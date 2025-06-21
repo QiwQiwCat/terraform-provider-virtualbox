@@ -48,6 +48,7 @@ func (p *virtualboxProvider) Resources(ctx context.Context) []func() resource.Re
 func (p *virtualboxProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewVmsDataSource,
+		NewOsTypesDataSource,
 	}
 }
 
