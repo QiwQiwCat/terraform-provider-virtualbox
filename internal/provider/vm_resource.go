@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -12,7 +13,8 @@ import (
 )
 
 var (
-	_ resource.Resource = &vmResource{}
+	_ resource.Resource                = &vmResource{}
+	_ resource.ResourceWithImportState = &vmResource{}
 )
 
 type vmResource struct{}
@@ -22,6 +24,7 @@ type vmResourceModel struct {
 	Name   types.String `tfsdk:"name"`
 	Cpus   types.Int32  `tfsdk:"cpus"`
 	Memory types.Int64  `tfsdk:"memory"`
+	OsType types.String `tfsdk:"ostype"`
 }
 
 func (r *vmResource) Metadata(ctx context.Context, request resource.MetadataRequest, response *resource.MetadataResponse) {
@@ -50,6 +53,10 @@ func (r *vmResource) Schema(ctx context.Context, request resource.SchemaRequest,
 			"memory": schema.Int64Attribute{
 				Required:    true,
 				Description: "The amount of memory (in MB) to assign to the Virtual Machine.",
+			},
+			"ostype": schema.StringAttribute{
+				Description: "The OS type to assign to the Virtual Machine. This should match one of the available OS types in your VirtualBox installation.",
+				Computed:    true,
 			},
 		},
 	}
@@ -100,6 +107,7 @@ func (r *vmResource) Create(ctx context.Context, request resource.CreateRequest,
 	vmInfo := ParseShowVMInfo(output)
 
 	plan.UUID = types.StringValue(GetVMInfoFromOutput(vmInfo, "UUID"))
+	plan.OsType = types.StringValue(GetVMInfoFromOutput(vmInfo, "ostype"))
 
 	// Set state to fully populated data
 	diags = response.State.Set(ctx, plan)
@@ -118,9 +126,9 @@ func (r *vmResource) Read(ctx context.Context, request resource.ReadRequest, res
 		return
 	}
 
-	vmName := state.Name.ValueString()
+	vmUuid := state.UUID.ValueString()
 
-	output, err := RunVBoxManageWithOutput("showvminfo", vmName, "--machinereadable")
+	output, err := RunVBoxManageWithOutput("showvminfo", vmUuid, "--machinereadable")
 	if err != nil {
 		response.Diagnostics.AddError(
 			"Error reading VM",
@@ -132,8 +140,29 @@ func (r *vmResource) Read(ctx context.Context, request resource.ReadRequest, res
 	// Parse the output to get the UUID and other details
 	vmInfo := ParseShowVMInfo(output)
 
-	// Overwrite uuid with refreshed state
+	// Overwrite data with refreshed state
+	integerValueCpus, err := strconv.Atoi(GetVMInfoFromOutput(vmInfo, "cpus"))
+	if err != nil {
+		response.Diagnostics.AddError(
+			"Error parsing CPUs",
+			"Could not parse CPUs from virtual machine information, unexpected error: "+err.Error(),
+		)
+		return
+	}
+	integerValueMemory, err := strconv.Atoi(GetVMInfoFromOutput(vmInfo, "memory"))
+	if err != nil {
+		response.Diagnostics.AddError(
+			"Error parsing Memory",
+			"Could not parse Memory from virtual machine information, unexpected error: "+err.Error(),
+		)
+		return
+	}
+
+	state.Name = types.StringValue(GetVMInfoFromOutput(vmInfo, "name"))
+	state.Cpus = types.Int32Value(int32(integerValueCpus))
+	state.Memory = types.Int64Value(int64(integerValueMemory))
 	state.UUID = types.StringValue(GetVMInfoFromOutput(vmInfo, "UUID"))
+	state.OsType = types.StringValue(GetVMInfoFromOutput(vmInfo, "ostype"))
 
 	// Set refreshed state
 	diags = response.State.Set(ctx, &state)
@@ -219,6 +248,7 @@ func (r *vmResource) Update(ctx context.Context, request resource.UpdateRequest,
 	plan.Name = types.StringValue(GetVMInfoFromOutput(vmInfo, "name"))
 	plan.Cpus = types.Int32Value(cpus)
 	plan.Memory = types.Int64Value(memory)
+	plan.OsType = types.StringValue(GetVMInfoFromOutput(vmInfo, "ostype"))
 
 	diags = response.State.Set(ctx, plan)
 	response.Diagnostics.Append(diags...)
@@ -243,6 +273,11 @@ func (r *vmResource) Delete(ctx context.Context, request resource.DeleteRequest,
 		)
 		return
 	}
+}
+
+func (r *vmResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	// Retrieve import ID and save to id attribute
+	resource.ImportStatePassthroughID(ctx, path.Root("uuid"), req, resp)
 }
 
 func NewVmResource() resource.Resource {
